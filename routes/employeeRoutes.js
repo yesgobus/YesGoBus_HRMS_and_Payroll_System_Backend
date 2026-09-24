@@ -8,6 +8,7 @@ router.get("/", (req, res) => {
   const sql = `
     SELECT
       employee_id,
+      name,
       first_name,
       middle_name,
       last_name,
@@ -51,6 +52,7 @@ router.get("/:employeeId", (req, res) => {
   const sql = `
     SELECT
       employee_id,
+      name,
       first_name,
       middle_name,
       last_name,
@@ -92,13 +94,17 @@ router.get("/:employeeId", (req, res) => {
   });
 });
 
+
 // GET all employees visible to a user
 router.get("/:employeeId/visible-employees", (req, res) => {
   const { employeeId } = req.params;
 
   // First get the logged-in employee
   const userSql = `
-    SELECT employee_id, role, reporting_manager_id
+    SELECT
+      employee_id,
+      role,
+      reporting_manager_id
     FROM employees
     WHERE employee_id = ?
       AND status = 'Active'
@@ -107,6 +113,7 @@ router.get("/:employeeId/visible-employees", (req, res) => {
   db.query(userSql, [employeeId], (err, users) => {
     if (err) {
       console.error("Get user error:", err);
+
       return res.status(500).json({
         success: false,
         message: "Database error"
@@ -134,6 +141,7 @@ router.get("/:employeeId/visible-employees", (req, res) => {
       return db.query(sql, [employeeId], (err, results) => {
         if (err) {
           console.error("Get visible employee error:", err);
+
           return res.status(500).json({
             success: false,
             message: "Database error"
@@ -167,10 +175,10 @@ router.get("/:employeeId/visible-employees", (req, res) => {
       )
       SELECT
         e.employee_id,
+        e.name,
         e.first_name,
         e.middle_name,
         e.last_name,
-        e.name,
         e.email,
         e.department,
         e.designation,
@@ -204,6 +212,8 @@ router.get("/:employeeId/visible-employees", (req, res) => {
     });
   });
 });
+
+
 // GET manager's team
 router.get("/:employeeId/team", (req, res) => {
   const { employeeId } = req.params;
@@ -211,6 +221,7 @@ router.get("/:employeeId/team", (req, res) => {
   const sql = `
     SELECT
       employee_id,
+      name,
       first_name,
       middle_name,
       last_name,
@@ -247,5 +258,6 @@ router.get("/:employeeId/team", (req, res) => {
     });
   });
 });
+
 
 module.exports = router;
