@@ -9,10 +9,6 @@ router.get("/", (req, res) => {
     SELECT
       employee_id,
       name,
-      first_name,
-      middle_name,
-      last_name,
-      dob,
       gender,
       contact_details,
       doj,
@@ -53,10 +49,6 @@ router.get("/:employeeId", (req, res) => {
     SELECT
       employee_id,
       name,
-      first_name,
-      middle_name,
-      last_name,
-      dob,
       gender,
       contact_details,
       doj,
@@ -132,7 +124,18 @@ router.get("/:employeeId/visible-employees", (req, res) => {
     // Employee → own data only
     if (user.role === "Employee") {
       const sql = `
-        SELECT *
+        SELECT
+          employee_id,
+          name,
+          gender,
+          contact_details,
+          doj,
+          job_title,
+          email,
+          department,
+          designation,
+          reporting_manager_id,
+          status
         FROM employees
         WHERE employee_id = ?
           AND status = 'Active'
@@ -173,12 +176,13 @@ router.get("/:employeeId/visible-employees", (req, res) => {
           ON e.reporting_manager_id = h.employee_id
         WHERE e.status = 'Active'
       )
+
       SELECT
         e.employee_id,
         e.name,
-        e.first_name,
-        e.middle_name,
-        e.last_name,
+        e.gender,
+        e.contact_details,
+        e.doj,
         e.email,
         e.department,
         e.designation,
@@ -222,10 +226,6 @@ router.get("/:employeeId/team", (req, res) => {
     SELECT
       employee_id,
       name,
-      first_name,
-      middle_name,
-      last_name,
-      dob,
       gender,
       contact_details,
       doj,

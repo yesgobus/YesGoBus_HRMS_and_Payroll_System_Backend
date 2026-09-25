@@ -8,6 +8,11 @@ const db = mysql.createPool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 3306,
+
+  // Return MySQL DATE values as YYYY-MM-DD strings
+  // instead of JavaScript Date objects/timezone-converted values
+  dateStrings: true,
+
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
