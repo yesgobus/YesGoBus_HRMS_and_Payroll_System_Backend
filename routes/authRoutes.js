@@ -18,9 +18,6 @@ router.post("/login", (req, res) => {
     SELECT
       id,
       employee_id,
-      first_name,
-      middle_name,
-      last_name,
       name,
       email,
       department,
@@ -83,9 +80,6 @@ router.post("/login", (req, res) => {
       )
       SELECT
         e.employee_id,
-        e.first_name,
-        e.middle_name,
-        e.last_name,
         e.name,
         e.email,
         e.department,
