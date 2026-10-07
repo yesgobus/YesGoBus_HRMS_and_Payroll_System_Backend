@@ -4,6 +4,34 @@ const db = require("../db");
 const router = express.Router();
 
 // ===============================
+// CALCULATE TOTAL WORKING HOURS
+// ===============================
+function calculateWorkingHours(checkIn, checkOut) {
+  if (!checkIn || !checkOut) {
+    return null;
+  }
+
+  const start = new Date(`1970-01-01T${checkIn}`);
+  const end = new Date(`1970-01-01T${checkOut}`);
+
+  let difference = end - start;
+
+  // Handles overnight shifts
+  if (difference < 0) {
+    difference += 24 * 60 * 60 * 1000;
+  }
+
+  const totalSeconds = Math.floor(difference / 1000);
+
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+
+// ===============================
 // CHECK-IN
 // ===============================
 router.post("/check-in", (req, res) => {
@@ -83,11 +111,52 @@ router.post("/check-in", (req, res) => {
           });
         }
 
-        res.json({
-          success: true,
-          message: "Check-in successful",
-          attendanceId: result.insertId
-        });
+        // Get the newly created attendance record
+        const getAttendanceSql = `
+          SELECT
+            id,
+            employee_id,
+            attendance_date,
+            check_in,
+            check_out,
+            status
+          FROM attendance
+          WHERE id = ?
+        `;
+
+        db.query(
+          getAttendanceSql,
+          [result.insertId],
+          (attendanceErr, attendanceResults) => {
+            if (attendanceErr) {
+              console.error(
+                "Attendance fetch error:",
+                attendanceErr
+              );
+
+              return res.status(500).json({
+                success: false,
+                message:
+                  "Check-in successful but unable to fetch attendance"
+              });
+            }
+
+            const attendance = attendanceResults[0];
+
+            res.json({
+              success: true,
+              message: "Check-in successful",
+              attendance: {
+                employeeId: attendance.employee_id,
+                date: attendance.attendance_date,
+                checkIn: attendance.check_in,
+                checkOut: attendance.check_out,
+                totalWorkingHours: null,
+                status: attendance.status
+              }
+            });
+          }
+        );
       });
     });
   });
@@ -163,11 +232,57 @@ router.post("/check-out", (req, res) => {
         });
       }
 
-      res.json({
-        success: true,
-        message: "Check-out successful",
-        attendanceId: attendance.id
-      });
+      // Get updated attendance record
+      const getUpdatedSql = `
+        SELECT
+          id,
+          employee_id,
+          attendance_date,
+          check_in,
+          check_out,
+          status
+        FROM attendance
+        WHERE id = ?
+      `;
+
+      db.query(
+        getUpdatedSql,
+        [attendance.id],
+        (fetchErr, updatedResults) => {
+          if (fetchErr) {
+            console.error(
+              "Updated attendance fetch error:",
+              fetchErr
+            );
+
+            return res.status(500).json({
+              success: false,
+              message:
+                "Check-out successful but unable to fetch attendance"
+            });
+          }
+
+          const updatedAttendance = updatedResults[0];
+
+          const totalWorkingHours = calculateWorkingHours(
+            updatedAttendance.check_in,
+            updatedAttendance.check_out
+          );
+
+          res.json({
+            success: true,
+            message: "Check-out successful",
+            attendance: {
+              employeeId: updatedAttendance.employee_id,
+              date: updatedAttendance.attendance_date,
+              checkIn: updatedAttendance.check_in,
+              checkOut: updatedAttendance.check_out,
+              totalWorkingHours: totalWorkingHours,
+              status: updatedAttendance.status
+            }
+          });
+        }
+      );
     });
   });
 });
@@ -210,9 +325,23 @@ router.get("/today/:employeeId", (req, res) => {
       });
     }
 
+    const attendance = results[0];
+
+    const totalWorkingHours = calculateWorkingHours(
+      attendance.check_in,
+      attendance.check_out
+    );
+
     res.json({
       success: true,
-      attendance: results[0]
+      attendance: {
+        employeeId: attendance.employee_id,
+        date: attendance.attendance_date,
+        checkIn: attendance.check_in,
+        checkOut: attendance.check_out,
+        totalWorkingHours: totalWorkingHours,
+        status: attendance.status
+      }
     });
   });
 });
@@ -247,10 +376,22 @@ router.get("/history/:employeeId", (req, res) => {
       });
     }
 
+    const attendance = results.map((record) => ({
+      employeeId: record.employee_id,
+      date: record.attendance_date,
+      checkIn: record.check_in,
+      checkOut: record.check_out,
+      totalWorkingHours: calculateWorkingHours(
+        record.check_in,
+        record.check_out
+      ),
+      status: record.status
+    }));
+
     res.json({
       success: true,
-      count: results.length,
-      attendance: results
+      count: attendance.length,
+      attendance: attendance
     });
   });
 });
@@ -290,11 +431,26 @@ router.get("/manager/:managerId", (req, res) => {
       });
     }
 
+    const attendance = results.map((record) => ({
+      employeeId: record.employee_id,
+      name: record.name,
+      department: record.department,
+      designation: record.designation,
+      date: record.attendance_date,
+      checkIn: record.check_in,
+      checkOut: record.check_out,
+      totalWorkingHours: calculateWorkingHours(
+        record.check_in,
+        record.check_out
+      ),
+      status: record.status
+    }));
+
     res.json({
       success: true,
       managerId: managerId,
-      count: results.length,
-      attendance: results
+      count: attendance.length,
+      attendance: attendance
     });
   });
 });
