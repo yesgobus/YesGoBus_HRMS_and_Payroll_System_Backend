@@ -3,9 +3,28 @@ const db = require("../db");
 
 const router = express.Router();
 
+/*
+========================================
+INDIA STANDARD TIME (IST)
+========================================
+UTC + 05:30
+
+We use UTC_TIMESTAMP() and explicitly
+convert it to IST so the API does not
+depend on the MySQL/server timezone.
+*/
+
+const IST_DATE_SQL =
+  "DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:30'))";
+
+const IST_TIME_SQL =
+  "TIME(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:30'))";
+
+
 // ===============================
 // CALCULATE TOTAL WORKING HOURS
 // ===============================
+
 function calculateWorkingHours(checkIn, checkOut) {
   if (!checkIn || !checkOut) {
     return null;
@@ -27,13 +46,17 @@ function calculateWorkingHours(checkIn, checkOut) {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
 
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(
+    2,
+    "0"
+  )}:${String(seconds).padStart(2, "0")}`;
 }
 
 
 // ===============================
 // CHECK-IN
 // ===============================
+
 router.post("/check-in", (req, res) => {
   const { employeeId } = req.body;
 
@@ -69,12 +92,12 @@ router.post("/check-in", (req, res) => {
       });
     }
 
-    // Check whether already checked in today
+    // Check whether already checked in today (IST)
     const checkSql = `
       SELECT *
       FROM attendance
       WHERE employee_id = ?
-        AND attendance_date = CURDATE()
+        AND attendance_date = ${IST_DATE_SQL}
     `;
 
     db.query(checkSql, [employeeId], (err, results) => {
@@ -94,11 +117,16 @@ router.post("/check-in", (req, res) => {
         });
       }
 
-      // Create today's attendance
+      // Create today's attendance using IST date and time
       const insertSql = `
         INSERT INTO attendance
         (employee_id, attendance_date, check_in, status)
-        VALUES (?, CURDATE(), CURTIME(), 'Present')
+        VALUES (
+          ?,
+          ${IST_DATE_SQL},
+          ${IST_TIME_SQL},
+          'Present'
+        )
       `;
 
       db.query(insertSql, [employeeId], (err, result) => {
@@ -166,6 +194,7 @@ router.post("/check-in", (req, res) => {
 // ===============================
 // CHECK-OUT
 // ===============================
+
 router.post("/check-out", (req, res) => {
   const { employeeId } = req.body;
 
@@ -176,11 +205,12 @@ router.post("/check-out", (req, res) => {
     });
   }
 
+  // Find today's attendance record using IST date
   const sql = `
     SELECT *
     FROM attendance
     WHERE employee_id = ?
-      AND attendance_date = CURDATE()
+      AND attendance_date = ${IST_DATE_SQL}
   `;
 
   db.query(sql, [employeeId], (err, results) => {
@@ -216,9 +246,10 @@ router.post("/check-out", (req, res) => {
       });
     }
 
+    // Save check-out time in IST
     const updateSql = `
       UPDATE attendance
-      SET check_out = CURTIME()
+      SET check_out = ${IST_TIME_SQL}
       WHERE id = ?
     `;
 
@@ -291,6 +322,7 @@ router.post("/check-out", (req, res) => {
 // ===============================
 // TODAY'S ATTENDANCE
 // ===============================
+
 router.get("/today/:employeeId", (req, res) => {
   const { employeeId } = req.params;
 
@@ -304,7 +336,7 @@ router.get("/today/:employeeId", (req, res) => {
       status
     FROM attendance
     WHERE employee_id = ?
-      AND attendance_date = CURDATE()
+      AND attendance_date = ${IST_DATE_SQL}
   `;
 
   db.query(sql, [employeeId], (err, results) => {
@@ -350,6 +382,7 @@ router.get("/today/:employeeId", (req, res) => {
 // ===============================
 // EMPLOYEE ATTENDANCE HISTORY
 // ===============================
+
 router.get("/history/:employeeId", (req, res) => {
   const { employeeId } = req.params;
 
@@ -400,6 +433,7 @@ router.get("/history/:employeeId", (req, res) => {
 // ===============================
 // MANAGER'S TEAM ATTENDANCE
 // ===============================
+
 router.get("/manager/:managerId", (req, res) => {
   const { managerId } = req.params;
 
