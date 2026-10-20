@@ -260,4 +260,67 @@ router.get("/:employeeId/team", (req, res) => {
 });
 
 
+/* GET reporting manager details for an employee */
+router.get("/:employeeId/manager", (req, res) => {
+  const { employeeId } = req.params;
+
+  const sql = `
+    SELECT
+      e.employee_id AS employeeId,
+      e.name AS employeeName,
+      e.reporting_manager_id AS managerId,
+      m.name AS managerName,
+      m.email AS managerEmail
+    FROM employees e
+    LEFT JOIN employees m
+      ON e.reporting_manager_id = m.employee_id
+    WHERE e.employee_id = ?
+  `;
+
+  db.query(sql, [employeeId], (err, results) => {
+    if (err) {
+      console.error("Get manager details error:", err);
+
+      return res.status(500).json({
+        success: false,
+        message: "Database error"
+      });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found"
+      });
+    }
+
+    const employee = results[0];
+
+    if (!employee.managerId) {
+      return res.status(404).json({
+        success: false,
+        message: "No reporting manager assigned"
+      });
+    }
+
+    if (!employee.managerEmail) {
+      return res.status(404).json({
+        success: false,
+        message: "Manager email not available"
+      });
+    }
+
+    return res.json({
+      success: true,
+      employeeId: employee.employeeId,
+      employeeName: employee.employeeName,
+      manager: {
+        employeeId: employee.managerId,
+        name: employee.managerName,
+        email: employee.managerEmail
+      }
+    });
+  });
+});
+
 module.exports = router;
