@@ -105,42 +105,33 @@ router.post("/apply", (req, res) => {
         // YGB004 receives notifications, along with the active
         // manager of the employee's department.
         const recipientSql = `
-          SELECT
-            e.employee_id AS employeeId,
-            e.name AS employeeName,
-            e.department,
-            v.name AS directManagerName,
-            v.email AS directManagerEmail,
+  SELECT
+    e.employee_id AS employeeId,
+    e.name AS employeeName,
+    e.department,
 
-            (
-              SELECT dh.name
-              FROM employees dh
-              WHERE TRIM(dh.department) = TRIM(e.department)
-                AND TRIM(dh.role) = 'Manager'
-                AND dh.status = 'Active'
-              ORDER BY dh.id
-              LIMIT 1
-            ) AS departmentHeadName,
+    rm.name AS directManagerName,
+    rm.email AS directManagerEmail,
 
-            (
-              SELECT dh.email
-              FROM employees dh
-              WHERE TRIM(dh.department) = TRIM(e.department)
-                AND TRIM(dh.role) = 'Manager'
-                AND dh.status = 'Active'
-              ORDER BY dh.id
-              LIMIT 1
-            ) AS departmentHeadEmail
+    dh.name AS departmentHeadName,
+    dh.email AS departmentHeadEmail,
 
-          FROM employees e
+    'support@yesgobus.com' AS supportEmail
 
-          LEFT JOIN employees v
-            ON v.employee_id = 'YGB004'
-           AND v.status = 'Active'
+  FROM employees e
 
-          WHERE e.employee_id = ?
-            AND e.status = 'Active'
-        `;
+  LEFT JOIN employees rm
+    ON rm.employee_id = e.reporting_manager_id
+   AND rm.status = 'Active'
+
+  LEFT JOIN employees dh
+    ON TRIM(dh.department) = TRIM(e.department)
+   AND TRIM(dh.role) = 'Manager'
+   AND dh.status = 'Active'
+
+  WHERE e.employee_id = ?
+    AND e.status = 'Active'
+`;
 
         db.query(
           recipientSql,
@@ -168,16 +159,20 @@ router.post("/apply", (req, res) => {
               });
             }
 
-            const recipients = [
-              {
-                name: employee.directManagerName,
-                email: employee.directManagerEmail
-              },
-              {
-                name: employee.departmentHeadName,
-                email: employee.departmentHeadEmail
-              }
-            ];
+           const recipients = [
+  {
+    name: employee.directManagerName,
+    email: employee.directManagerEmail
+  },
+  {
+    name: employee.departmentHeadName,
+    email: employee.departmentHeadEmail
+  },
+  {
+    name: "Support",
+    email: employee.supportEmail
+  }
+];
 
             // Remove empty and duplicate email addresses.
             const uniqueRecipients = [
