@@ -1,13 +1,127 @@
+const bcrypt = require("bcryptjs");
+const authMiddleware = require("../middleware/authMiddleware");
 const express = require("express");
 const db = require("../db");
 
 const router = express.Router();
+// CHANGE PASSWORD API
+router.put("/change-password", authMiddleware, async (req, res) => {
+
+  console.log("CHANGE PASSWORD ROUTE HIT");
+
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+
+    // Get employee ID from JWT token
+    const employeeId = req.user.employeeId;
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "All password fields are required"
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "New password and confirm password do not match"
+      });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must contain at least 8 characters"
+      });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "New password must be different from current password"
+      });
+    }
+
+    const sql = `
+      SELECT password, status
+      FROM employees
+      WHERE employee_id = ?
+    `;
+
+    db.query(sql, [employeeId], async (err, results) => {
+      if (err) {
+        console.error("Fetch password error:", err);
+        return res.status(500).json({
+          success: false,
+          message: "Database error"
+        });
+      }
+
+      if (results.length === 0 || results[0].status !== "Active") {
+        return res.status(404).json({
+          success: false,
+          message: "Employee not found or inactive"
+        });
+      }
+
+      try {
+        const isValid = await bcrypt.compare(
+          currentPassword,
+          results[0].password
+        );
+
+        if (!isValid) {
+          return res.status(401).json({
+            success: false,
+            message: "Current password is incorrect"
+          });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+        db.query(
+          "UPDATE employees SET password = ? WHERE employee_id = ?",
+          [hashedPassword, employeeId],
+          (updateErr, updateResult) => {
+            if (updateErr) {
+              console.error("Update password error:", updateErr);
+              return res.status(500).json({
+                success: false,
+                message: "Failed to update password"
+              });
+            }
+
+            return res.status(200).json({
+              success: true,
+              message: "Password changed successfully"
+            });
+          }
+        );
+
+      } catch (error) {
+        console.error("Password verification error:", error);
+        return res.status(500).json({
+          success: false,
+          message: "Password processing failed"
+        });
+      }
+    });
+
+  } catch (error) {
+    console.error("Change password error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error"
+    });
+  }
+});
 
 // GET all employees
 router.get("/", (req, res) => {
   const sql = `
     SELECT
-      employee_id,
+    employee_id,
       name,
       gender,
       contact_details,
@@ -40,31 +154,33 @@ router.get("/", (req, res) => {
   });
 });
 
-
-// GET employee by ID
+// GET employee details by employee ID
 router.get("/:employeeId", (req, res) => {
   const { employeeId } = req.params;
 
   const sql = `
     SELECT
-      employee_id,
-      name,
+      employee_id AS employeeCode,
+      name AS fullName,
       gender,
-      contact_details,
-      doj,
-      job_title,
+      dob,
+      place,
+      contact_details AS contactNumber,
       email,
+      emergency_contact_number AS emergencyContactNumber,
+      doj AS joiningDate,
       department,
       designation,
-      reporting_manager_id,
-      status
+      job_title AS jobTitle,
+      role,
+      status AS accountStatus
     FROM employees
     WHERE employee_id = ?
   `;
 
   db.query(sql, [employeeId], (err, results) => {
     if (err) {
-      console.error("Get employee error:", err);
+      console.error("Get employee details error:", err);
 
       return res.status(500).json({
         success: false,
@@ -79,7 +195,7 @@ router.get("/:employeeId", (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       employee: results[0]
     });
