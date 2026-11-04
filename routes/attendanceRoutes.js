@@ -610,4 +610,193 @@ router.get("/manager/:managerId", (req, res) => {
   });
 });
 
+// ========================================
+// MONTHLY ATTENDANCE OVERVIEW
+// GET /api/attendance/monthly-overview/:employeeId?year=2026&month=11
+// ========================================
+
+router.get("/monthly-overview/:employeeId", (req, res) => {
+  const { employeeId } = req.params;
+  const year = Number(req.query.year);
+  const month = Number(req.query.month);
+
+  // Validate year and month
+  if (
+    !Number.isInteger(year) ||
+    year < 2000 ||
+    year > 2100 ||
+    !Number.isInteger(month) ||
+    month < 1 ||
+    month > 12
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Please provide a valid year and month."
+    });
+  }
+
+  // Month date range
+  const startDate =
+    `${year}-${String(month).padStart(2, "0")}-01`;
+
+  const nextMonth = new Date(Date.UTC(year, month, 1));
+
+  const endDate = nextMonth.toISOString().slice(0, 10);
+
+  // Calculate working days (Monday to Saturday)
+  function calculateWorkingDays(year, month) {
+    const daysInMonth =
+      new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+    let workingDays = 0;
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(Date.UTC(year, month - 1, day));
+
+      // Sunday = 0
+      if (date.getUTCDay() !== 0) {
+        workingDays++;
+      }
+    }
+
+    return workingDays;
+  }
+
+  // Calculate approved leave days excluding Sundays
+  function calculateLeaveDays(leaves) {
+    const leaveDates = new Set();
+
+    leaves.forEach((leave) => {
+      const leaveStart = new Date(
+        `${String(leave.start_date).slice(0, 10)}T00:00:00Z`
+      );
+
+      const leaveEnd = new Date(
+        `${String(leave.end_date).slice(0, 10)}T00:00:00Z`
+      );
+
+      const monthStart = new Date(`${startDate}T00:00:00Z`);
+      const monthEnd = new Date(`${endDate}T00:00:00Z`);
+
+      const current = new Date(
+        Math.max(leaveStart.getTime(), monthStart.getTime())
+      );
+
+      const lastDate = new Date(
+        Math.min(
+          leaveEnd.getTime(),
+          monthEnd.getTime() - 86400000
+        )
+      );
+
+      while (current <= lastDate) {
+        // Exclude Sundays
+        if (current.getUTCDay() !== 0) {
+          leaveDates.add(current.toISOString().slice(0, 10));
+        }
+
+        current.setUTCDate(current.getUTCDate() + 1);
+      }
+    });
+
+    return leaveDates.size;
+  }
+
+  // Verify employee
+  const employeeSql = `
+    SELECT employee_id
+    FROM employees
+    WHERE employee_id = ?
+  `;
+
+  db.query(employeeSql, [employeeId], (employeeErr, employees) => {
+    if (employeeErr) {
+      console.error("Monthly overview employee error:", employeeErr);
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to verify employee."
+      });
+    }
+
+    if (employees.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found."
+      });
+    }
+
+    // Fetch present attendance records
+    const attendanceSql = `
+      SELECT COUNT(DISTINCT DATE(attendance_date)) AS daysPresent
+      FROM attendance
+      WHERE employee_id = ?
+        AND attendance_date >= ?
+        AND attendance_date < ?
+        AND LOWER(status) = 'present'
+        AND DAYOFWEEK(attendance_date) <> 1
+    `;
+
+    db.query(
+      attendanceSql,
+      [employeeId, startDate, endDate],
+      (attendanceErr, attendanceResults) => {
+        if (attendanceErr) {
+          console.error("Monthly attendance error:", attendanceErr);
+
+          return res.status(500).json({
+            success: false,
+            message: "Unable to fetch attendance."
+          });
+        }
+
+        const daysPresent = Number(
+          attendanceResults[0].daysPresent || 0
+        );
+
+        // Fetch approved leaves overlapping this month
+        const leaveSql = `
+          SELECT start_date, end_date
+          FROM leaves
+          WHERE employee_id = ?
+            AND LOWER(status) = 'approved'
+            AND start_date < ?
+            AND end_date >= ?
+        `;
+
+        db.query(
+          leaveSql,
+          [employeeId, endDate, startDate],
+          (leaveErr, leaveResults) => {
+            if (leaveErr) {
+              console.error("Monthly leave error:", leaveErr);
+
+              return res.status(500).json({
+                success: false,
+                message: "Unable to fetch approved leaves."
+              });
+            }
+
+            const workingDays =
+              calculateWorkingDays(year, month);
+
+            const leaveTaken =
+              calculateLeaveDays(leaveResults);
+
+            return res.json({
+              success: true,
+              employeeId,
+              year,
+              month,
+              workingDays,
+              daysPresent,
+              leaveTaken
+            });
+          }
+        );
+      }
+    );
+  });
+});
+
 module.exports = router;

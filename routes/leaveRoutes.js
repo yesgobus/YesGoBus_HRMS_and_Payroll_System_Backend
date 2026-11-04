@@ -7,8 +7,123 @@ const router = express.Router();
 
 const ALLOWED_LEAVE_TYPES = ["SL", "CL", "EL"];
 
-// APPLY FOR LEAVE
-router.post("/apply", (req, res) => {
+const LEAVE_ALLOCATION = {
+  CL: 12,
+  SL: 12,
+  EL: 15
+};
+
+// --------------------------------------------------
+// HELPER FUNCTIONS
+// --------------------------------------------------
+
+function isValidDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const date = new Date(`${value}T00:00:00Z`);
+
+  return !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value;
+}
+
+function daysBetween(start, end) {
+  const startTime = Date.parse(`${start}T00:00:00Z`);
+  const endTime = Date.parse(`${end}T00:00:00Z`);
+
+  return Math.floor((endTime - startTime) / 86400000) + 1;
+}
+
+// Calculate the number of leave days falling inside a particular year.
+function daysInYear(startDate, endDate, year) {
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+
+  const start = startDate > yearStart ? startDate : yearStart;
+  const end = endDate < yearEnd ? endDate : yearEnd;
+
+  if (start > end) return 0;
+
+  return daysBetween(start, end);
+}
+
+function getYears(startDate, endDate) {
+  const years = [];
+
+  const firstYear = Number(startDate.substring(0, 4));
+  const lastYear = Number(endDate.substring(0, 4));
+
+  for (let year = firstYear; year <= lastYear; year++) {
+    years.push(year);
+  }
+
+  return years;
+}
+
+function calculateYearlyUsage(leaves, year) {
+  const result = {
+    CL: { used: 0, pending: 0 },
+    SL: { used: 0, pending: 0 },
+    EL: { used: 0, pending: 0 }
+  };
+
+  for (const leave of leaves) {
+    if (!result[leave.leave_type]) continue;
+
+    const days = daysInYear(
+      leave.start_date,
+      leave.end_date,
+      year
+    );
+
+    if (leave.status === "Approved") {
+      result[leave.leave_type].used += days;
+    } else if (leave.status === "Pending") {
+      result[leave.leave_type].pending += days;
+    }
+  }
+
+  return result;
+}
+
+function buildBalanceResponse(employeeId, year, leaves) {
+  const usage = calculateYearlyUsage(leaves, year);
+
+  const leaveBalances = {};
+
+  for (const type of ALLOWED_LEAVE_TYPES) {
+    const total = LEAVE_ALLOCATION[type];
+    const used = usage[type].used;
+    const pending = usage[type].pending;
+
+    leaveBalances[type] = {
+      total,
+      used,
+      pending,
+      remaining: total - used - pending
+    };
+  }
+
+  return {
+    success: true,
+    employeeId,
+    year,
+    leaveBalances
+  };
+}
+
+// Get a connection that supports transactions.
+async function getConnection() {
+  return db.promise().getConnection();
+}
+
+// --------------------------------------------------
+// 1. APPLY FOR LEAVE
+// POST /api/leave/apply
+// --------------------------------------------------
+
+router.post("/apply", async (req, res) => {
   const {
     employeeId,
     leaveType,
@@ -31,20 +146,6 @@ router.post("/apply", (req, res) => {
     });
   }
 
-  // Validate date format and chronological order.
-  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-
-  const isValidDate = (value) => {
-    if (typeof value !== "string" || !datePattern.test(value)) {
-      return false;
-    }
-
-    const date = new Date(`${value}T00:00:00Z`);
-
-    return !Number.isNaN(date.getTime()) &&
-      date.toISOString().slice(0, 10) === value;
-  };
-
   if (
     !isValidDate(startDate) ||
     !isValidDate(endDate) ||
@@ -56,213 +157,291 @@ router.post("/apply", (req, res) => {
     });
   }
 
-  const employeeSql = `
-    SELECT employee_id
-    FROM employees
-    WHERE employee_id = ?
-      AND status = 'Active'
-  `;
+  let connection;
+  let leaveId;
 
-  db.query(employeeSql, [employeeId], (err, employees) => {
-    if (err) {
-      console.error("Employee check error:", err);
+  try {
+    connection = await getConnection();
+    await connection.beginTransaction();
 
-      return res.status(500).json({
-        success: false,
-        message: "Database error"
-      });
-    }
+    // Lock the employee row so simultaneous applications
+    // for the same employee are processed one at a time.
+    const [employees] = await connection.execute(
+      `SELECT employee_id
+       FROM employees
+       WHERE employee_id = ?
+         AND status = 'Active'
+       FOR UPDATE`,
+      [employeeId]
+    );
 
-    if (!employees || employees.length === 0) {
+    if (employees.length === 0) {
+      await connection.rollback();
+
       return res.status(404).json({
         success: false,
         message: "Employee not found or inactive"
       });
     }
 
-    const leaveSql = `
-      INSERT INTO leaves
-        (employee_id, leave_type, start_date, end_date, reason, status)
-      VALUES (?, ?, ?, ?, ?, 'Pending')
-    `;
+    // Get all active reservations and approved leave records.
+    const [existingLeaves] = await connection.execute(
+      `SELECT leave_type, start_date, end_date, status
+       FROM leaves
+       WHERE employee_id = ?
+         AND status IN ('Pending', 'Approved')
+         AND leave_type IN ('SL', 'CL', 'EL')`,
+      [employeeId]
+    );
 
-    db.query(
-      leaveSql,
-      [employeeId, leaveType, startDate, endDate, reason || null],
-      (err, result) => {
-        if (err) {
-          console.error("Leave application error:", err);
+    // Prevent overlapping pending or approved leave applications.
+    const overlaps = existingLeaves.some(leave => {
+      return startDate <= leave.end_date &&
+        endDate >= leave.start_date;
+    });
 
-          return res.status(500).json({
-            success: false,
-            message: "Unable to apply for leave"
-          });
-        }
+    if (overlaps) {
+      await connection.rollback();
 
-        const leaveId = result.insertId;
+      return res.status(409).json({
+        success: false,
+        message: "You already have a pending or approved leave application for overlapping dates."
+      });
+    }
 
-        // Preserve the existing notification policy:
-        // YGB004 receives notifications, along with the active
-        // manager of the employee's department.
-        const recipientSql = `
-  SELECT
-    e.employee_id AS employeeId,
-    e.name AS employeeName,
-    e.department,
+    // Check the requested days against each calendar year's balance.
+    const years = getYears(startDate, endDate);
 
-    rm.name AS directManagerName,
-    rm.email AS directManagerEmail,
+    for (const year of years) {
+      const requestedDays = daysInYear(startDate, endDate, year);
 
-    dh.name AS departmentHeadName,
-    dh.email AS departmentHeadEmail,
+      const usage = calculateYearlyUsage(existingLeaves, year);
 
-    'support@yesgobus.com' AS supportEmail
+      const used = usage[leaveType].used;
+      const pending = usage[leaveType].pending;
 
-  FROM employees e
+      const total = LEAVE_ALLOCATION[leaveType];
+      const remaining = total - used - pending;
 
-  LEFT JOIN employees rm
-    ON rm.employee_id = e.reporting_manager_id
-   AND rm.status = 'Active'
+      if (requestedDays > remaining) {
+        await connection.rollback();
 
-  LEFT JOIN employees dh
-    ON TRIM(dh.department) = TRIM(e.department)
-   AND TRIM(dh.role) = 'Manager'
-   AND dh.status = 'Active'
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient ${leaveType} balance for ${year}.`,
+          year,
+          total,
+          used,
+          pending,
+          remaining,
+          requested: requestedDays
+        });
+      }
+    }
 
-  WHERE e.employee_id = ?
-    AND e.status = 'Active'
-`;
+    // Insert pending leave.
+    // Pending leave immediately reserves the requested days.
+    const [insertResult] = await connection.execute(
+      `INSERT INTO leaves
+       (employee_id, leave_type, start_date, end_date, reason, status)
+       VALUES (?, ?, ?, ?, ?, 'Pending')`,
+      [
+        employeeId,
+        leaveType,
+        startDate,
+        endDate,
+        reason || null
+      ]
+    );
 
-        db.query(
-          recipientSql,
-          [employeeId],
-          async (lookupErr, rows) => {
-            if (lookupErr) {
-              console.error("Recipient lookup error:", lookupErr);
+    leaveId = insertResult.insertId;
 
-              return res.json({
-                success: true,
-                message: "Leave applied, but notification lookup failed.",
-                leaveId,
-                emailSent: false
-              });
-            }
+    await connection.commit();
 
-            const employee = rows && rows[0];
+  } catch (error) {
+    if (connection) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Leave transaction rollback error:", rollbackError);
+      }
+    }
 
-            if (!employee) {
-              return res.json({
-                success: true,
-                message: "Leave applied, but employee details were not found.",
-                leaveId,
-                emailSent: false
-              });
-            }
+    console.error("Leave application error:", error);
 
-           const recipients = [
-  {
-    name: employee.directManagerName,
-    email: employee.directManagerEmail
-  },
-  {
-    name: employee.departmentHeadName,
-    email: employee.departmentHeadEmail
-  },
-  {
-    name: "Support",
-    email: employee.supportEmail
+    return res.status(500).json({
+      success: false,
+      message: "Unable to apply for leave",
+      error: error.message
+    });
+
+  } finally {
+    if (connection) connection.release();
   }
-];
 
-            // Remove empty and duplicate email addresses.
-            const uniqueRecipients = [
-              ...new Map(
-                recipients
-                  .filter(
-                    recipient =>
-                      typeof recipient.email === "string" &&
-                      recipient.email.trim() !== ""
-                  )
-                  .map(recipient => {
-                    const email = recipient.email.trim();
+  // Send notifications only after the leave application is committed.
+  // A notification failure does not cancel the application.
 
-                    return [
-                      email.toLowerCase(),
-                      { ...recipient, email }
-                    ];
-                  })
-              ).values()
+  const recipientSql = `
+    SELECT
+      e.employee_id AS employeeId,
+      e.name AS employeeName,
+      e.department,
+
+      rm.name AS directManagerName,
+      rm.email AS directManagerEmail,
+
+      dh.name AS departmentHeadName,
+      dh.email AS departmentHeadEmail,
+
+      'support@yesgobus.com' AS supportEmail
+
+    FROM employees e
+
+    LEFT JOIN employees rm
+      ON rm.employee_id = e.reporting_manager_id
+     AND rm.status = 'Active'
+
+    LEFT JOIN employees dh
+      ON TRIM(dh.department) = TRIM(e.department)
+     AND TRIM(dh.role) = 'Manager'
+     AND dh.status = 'Active'
+
+    WHERE e.employee_id = ?
+      AND e.status = 'Active'
+  `;
+
+  try {
+    const [rows] = await db.promise().execute(
+      recipientSql,
+      [employeeId]
+    );
+
+    const employee = rows[0];
+
+    if (!employee) {
+      return res.json({
+        success: true,
+        message: "Leave applied, but employee details were not found.",
+        leaveId,
+        status: "Pending",
+        emailSent: false
+      });
+    }
+
+    const recipients = [
+      {
+        name: employee.directManagerName,
+        email: employee.directManagerEmail
+      },
+      {
+        name: employee.departmentHeadName,
+        email: employee.departmentHeadEmail
+      },
+      {
+        name: "Support",
+        email: employee.supportEmail
+      }
+    ];
+
+    const uniqueRecipients = [
+      ...new Map(
+        recipients
+          .filter(
+            recipient =>
+              typeof recipient.email === "string" &&
+              recipient.email.trim() !== ""
+          )
+          .map(recipient => {
+            const email = recipient.email.trim();
+
+            return [
+              email.toLowerCase(),
+              { ...recipient, email }
             ];
+          })
+      ).values()
+    ];
 
-            if (uniqueRecipients.length === 0) {
-              return res.json({
-                success: true,
-                message: "Leave applied, but no notification recipients were found.",
-                leaveId,
-                emailSent: false,
-                sentTo: [],
-                failedFor: []
-              });
-            }
+    if (uniqueRecipients.length === 0) {
+      return res.json({
+        success: true,
+        message: "Leave applied, but no notification recipients were found.",
+        leaveId,
+        status: "Pending",
+        emailSent: false,
+        sentTo: [],
+        failedFor: []
+      });
+    }
 
-            // Attempt notification to each unique recipient.
-            const results = await Promise.allSettled(
-              uniqueRecipients.map(recipient =>
-                sendLeaveNotification({
-                  managerEmail: recipient.email,
-                  employeeName: employee.employeeName,
-                  employeeId: employee.employeeId,
-                  leaveType,
-                  startDate,
-                  endDate,
-                  reason,
-                  leaveId
-                })
-              )
-            );
+    const results = await Promise.allSettled(
+      uniqueRecipients.map(recipient =>
+        sendLeaveNotification({
+          managerEmail: recipient.email,
+          employeeName: employee.employeeName,
+          employeeId: employee.employeeId,
+          leaveType,
+          startDate,
+          endDate,
+          reason,
+          leaveId
+        })
+      )
+    );
 
-            const sentTo = [];
-            const failedFor = [];
+    const sentTo = [];
+    const failedFor = [];
 
-            results.forEach((result, index) => {
-              const recipient = uniqueRecipients[index];
+    results.forEach((result, index) => {
+      const recipient = uniqueRecipients[index];
 
-              if (result.status === "fulfilled") {
-                sentTo.push(recipient.email);
+      if (result.status === "fulfilled") {
+        sentTo.push(recipient.email);
 
-                console.log(
-                  `Leave ${leaveId}: email accepted by SMTP for ${recipient.email}`
-                );
-              } else {
-                failedFor.push(recipient.email);
+        console.log(
+          `Leave ${leaveId}: email accepted by SMTP for ${recipient.email}`
+        );
+      } else {
+        failedFor.push(recipient.email);
 
-                console.error(
-                  `Leave ${leaveId}: email failed for ${recipient.email}:`,
-                  result.reason?.message || result.reason
-                );
-              }
-            });
-
-            const allSent = failedFor.length === 0;
-
-            return res.json({
-              success: true,
-              message: allSent
-                ? "Leave applied and all notification emails accepted by SMTP."
-                : "Leave applied, but some notification emails failed.",
-              leaveId,
-              emailSent: allSent,
-              sentTo,
-              failedFor
-            });
-          }
+        console.error(
+          `Leave ${leaveId}: email failed for ${recipient.email}:`,
+          result.reason?.message || result.reason
         );
       }
-    );
-  });
+    });
+
+    return res.json({
+      success: true,
+      message: failedFor.length === 0
+        ? "Leave applied and all notification emails accepted by SMTP."
+        : "Leave applied, but some notification emails failed.",
+      leaveId,
+      status: "Pending",
+      emailSent: failedFor.length === 0,
+      sentTo,
+      failedFor
+    });
+
+  } catch (error) {
+    console.error("Leave notification error:", error);
+
+    return res.json({
+      success: true,
+      message: "Leave applied, but notification processing failed.",
+      leaveId,
+      status: "Pending",
+      emailSent: false
+    });
+  }
 });
 
-// GET EMPLOYEE LEAVE HISTORY
+// --------------------------------------------------
+// 2. GET EMPLOYEE LEAVE HISTORY
+// GET /api/leave/history/:employeeId
+// --------------------------------------------------
+
 router.get("/history/:employeeId", (req, res) => {
   const { employeeId } = req.params;
 
@@ -299,7 +478,11 @@ router.get("/history/:employeeId", (req, res) => {
   });
 });
 
-// GET PENDING LEAVES FOR REPORTING MANAGER
+// --------------------------------------------------
+// 3. GET PENDING LEAVES FOR REPORTING MANAGER
+// GET /api/leave/manager/:managerId/pending
+// --------------------------------------------------
+
 router.get("/manager/:managerId/pending", (req, res) => {
   const { managerId } = req.params;
 
@@ -343,8 +526,12 @@ router.get("/manager/:managerId/pending", (req, res) => {
   });
 });
 
-// MANAGER APPROVE OR REJECT LEAVE
-router.put("/status/:leaveId", (req, res) => {
+// --------------------------------------------------
+// 4. MANAGER APPROVE OR REJECT LEAVE
+// PUT /api/leave/status/:leaveId
+// --------------------------------------------------
+
+router.put("/status/:leaveId", async (req, res) => {
   const { leaveId } = req.params;
   const { status, managerId } = req.body;
 
@@ -362,80 +549,132 @@ router.put("/status/:leaveId", (req, res) => {
     });
   }
 
-  const checkSql = `
-    SELECT
-      l.id,
-      l.employee_id,
-      e.reporting_manager_id
-    FROM leaves l
-    INNER JOIN employees e
-      ON l.employee_id = e.employee_id
-    WHERE l.id = ?
-      AND l.status = 'Pending'
-  `;
+  let connection;
 
-  db.query(checkSql, [leaveId], (err, results) => {
-    if (err) {
-      console.error("Leave approval check error:", err);
+  try {
+    connection = await getConnection();
+    await connection.beginTransaction();
 
-      return res.status(500).json({
-        success: false,
-        message: "Database error"
-      });
-    }
+    // Find the employee associated with this leave.
+    const [initialRows] = await connection.execute(
+      `SELECT employee_id
+       FROM leaves
+       WHERE id = ?`,
+      [leaveId]
+    );
 
-    if (results.length === 0) {
+    if (initialRows.length === 0) {
+      await connection.rollback();
+
       return res.status(404).json({
         success: false,
-        message: "Pending leave application not found"
+        message: "Leave application not found"
       });
     }
 
-    const leave = results[0];
+    const employeeId = initialRows[0].employee_id;
 
-    // Preserve existing direct-manager authorization.
-    if (leave.reporting_manager_id !== managerId) {
+    // Lock employee first to serialize balance-affecting operations.
+    await connection.execute(
+      `SELECT employee_id
+       FROM employees
+       WHERE employee_id = ?
+       FOR UPDATE`,
+      [employeeId]
+    );
+
+    // Recheck leave and manager authorization under the transaction.
+    const [leaveRows] = await connection.execute(
+      `SELECT
+         l.id,
+         l.employee_id,
+         l.status,
+         e.reporting_manager_id
+       FROM leaves l
+       INNER JOIN employees e
+         ON l.employee_id = e.employee_id
+       WHERE l.id = ?
+       FOR UPDATE`,
+      [leaveId]
+    );
+
+    if (leaveRows.length === 0 || leaveRows[0].status !== "Pending") {
+      await connection.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Pending leave application not found or already processed"
+      });
+    }
+
+    const leave = leaveRows[0];
+
+    if (String(leave.reporting_manager_id) !== String(managerId)) {
+      await connection.rollback();
+
       return res.status(403).json({
         success: false,
         message: "You are not authorized to approve or reject this leave"
       });
     }
 
-    const updateSql = `
-      UPDATE leaves
-      SET status = ?
-      WHERE id = ?
-        AND status = 'Pending'
-    `;
+    const [updateResult] = await connection.execute(
+      `UPDATE leaves
+       SET status = ?
+       WHERE id = ?
+         AND status = 'Pending'`,
+      [status, leaveId]
+    );
 
-    db.query(updateSql, [status, leaveId], (err, result) => {
-      if (err) {
-        console.error("Leave status update error:", err);
+    if (updateResult.affectedRows === 0) {
+      await connection.rollback();
 
-        return res.status(500).json({
-          success: false,
-          message: "Database error"
-        });
-      }
-
-      if (result.affectedRows === 0) {
-        return res.status(409).json({
-          success: false,
-          message: "Leave status was already changed. Refresh and try again."
-        });
-      }
-
-      return res.json({
-        success: true,
-        message: `Leave ${status.toLowerCase()} successfully`,
-        leaveId,
-        status
+      return res.status(409).json({
+        success: false,
+        message: "Leave status was already changed. Refresh and try again."
       });
+    }
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: `Leave ${status.toLowerCase()} successfully`,
+      leaveId,
+      employeeId,
+      status,
+      balanceAction: status === "Rejected"
+        ? "Reserved leave restored"
+        : "Leave deduction retained"
     });
-  });
+
+  } catch (error) {
+    if (connection) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Status rollback error:", rollbackError);
+      }
+    }
+
+    console.error("Leave status update error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to update leave status",
+      error: error.message
+    });
+
+  } finally {
+    if (connection) connection.release();
+  }
 });
 
-// GET ALL PENDING LEAVES
+// --------------------------------------------------
+// 5. GET ALL PENDING LEAVES
+// GET /api/leave/pending
+// --------------------------------------------------
+
 router.get("/pending", (req, res) => {
   const sql = `
     SELECT
@@ -475,88 +714,78 @@ router.get("/pending", (req, res) => {
   });
 });
 
-// GET LEAVE BALANCE FOR AN EMPLOYEE
-// Allocation is unknown, so total and remaining stay null.
-// Only approved leave days are counted as used.
-router.get("/balance/:employeeId", (req, res) => {
+// --------------------------------------------------
+// 6. GET EMPLOYEE LEAVE BALANCE
+// GET /api/leave/balance/:employeeId
+// Optional: ?year=2026
+// --------------------------------------------------
+
+router.get("/balance/:employeeId", async (req, res) => {
   const { employeeId } = req.params;
 
-  const employeeSql = `
-    SELECT employee_id
-    FROM employees
-    WHERE employee_id = ?
-      AND status = 'Active'
-  `;
+  const year = req.query.year
+    ? Number(req.query.year)
+    : new Date().getFullYear();
 
-  db.query(employeeSql, [employeeId], (err, employees) => {
-    if (err) {
-      console.error("Get leave balance error:", err);
+  if (!Number.isInteger(year) || year < 2000 || year > 9999) {
+    return res.status(400).json({
+      success: false,
+      message: "Provide a valid calendar year"
+    });
+  }
 
-      return res.status(500).json({
-        success: false,
-        message: "Database error"
-      });
-    }
+  try {
+    const [employees] = await db.promise().execute(
+      `SELECT employee_id
+       FROM employees
+       WHERE employee_id = ?
+         AND status = 'Active'`,
+      [employeeId]
+    );
 
-    if (!employees || employees.length === 0) {
+    if (employees.length === 0) {
       return res.status(404).json({
         success: false,
         message: "Active employee not found"
       });
     }
 
-    const balanceSql = `
-      SELECT
-        leave_type,
-        COALESCE(
-          SUM(DATEDIFF(end_date, start_date) + 1),
-          0
-        ) AS used
-      FROM leaves
-      WHERE employee_id = ?
-        AND status = 'Approved'
-        AND leave_type IN ('SL', 'CL', 'EL')
-      GROUP BY leave_type
-    `;
+    const [leaves] = await db.promise().execute(
+      `SELECT
+         leave_type,
+         start_date,
+         end_date,
+         status
+       FROM leaves
+       WHERE employee_id = ?
+         AND status IN ('Pending', 'Approved')
+         AND leave_type IN ('SL', 'CL', 'EL')
+         AND start_date <= ?
+         AND end_date >= ?`,
+      [
+        employeeId,
+        `${year}-12-31`,
+        `${year}-01-01`
+      ]
+    );
 
-    db.query(balanceSql, [employeeId], (balanceErr, rows) => {
-      if (balanceErr) {
-        console.error("Calculate leave balance error:", balanceErr);
+    const response = buildBalanceResponse(
+      employees[0].employee_id,
+      year,
+      leaves
+    );
 
-        return res.status(500).json({
-          success: false,
-          message: "Unable to calculate leave balance"
-        });
-      }
+    return res.json(response);
 
-      const usedByType = {
-        SL: 0,
-        CL: 0,
-        EL: 0
-      };
+  } catch (error) {
+    console.error("Get leave balance error:", error);
 
-      rows.forEach(row => {
-        usedByType[row.leave_type] = Number(row.used);
-      });
-
-      const leaveBalances = {};
-
-      for (const type of ALLOWED_LEAVE_TYPES) {
-        leaveBalances[type] = {
-          total: null,
-          used: usedByType[type],
-          remaining: null
-        };
-      }
-
-      return res.json({
-        success: true,
-        employeeId: employees[0].employee_id,
-        leaveBalances,
-        note: "Leave allocations have not been configured. Total and remaining will be available after the company confirms its leave policy."
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Unable to calculate leave balance",
+      error: error.message
     });
-  });
+  }
 });
 
 module.exports = router;
