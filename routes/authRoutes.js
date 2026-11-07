@@ -70,15 +70,22 @@ function hashValue(value) {
 // =====================================
 
 async function verifyPassword(inputPassword, storedPassword, employeeId) {
-  if (!storedPassword) return false;
+  if (
+    typeof inputPassword !== "string" ||
+    typeof storedPassword !== "string" ||
+    !storedPassword
+  ) {
+    return false;
+  }
 
+  // Detect bcrypt password hashes
   const isBcryptHash = /^\$2[aby]\$\d{2}\$/.test(storedPassword);
 
   if (isBcryptHash) {
-    return bcrypt.compare(inputPassword, storedPassword);
+    return await bcrypt.compare(inputPassword, storedPassword);
   }
 
-  // Migrate existing plain-text password
+  // Support old plaintext passwords and migrate them
   if (inputPassword === storedPassword) {
     const hashedPassword = await bcrypt.hash(inputPassword, 10);
 
