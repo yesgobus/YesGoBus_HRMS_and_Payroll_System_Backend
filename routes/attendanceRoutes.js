@@ -799,4 +799,193 @@ router.get("/monthly-overview/:employeeId", (req, res) => {
   });
 });
 
+// ========================================
+// YEARLY ATTENDANCE SUMMARY
+// GET /api/attendance/summary/:employeeId?year=2026
+// Current year: January 1 through today (IST)
+// Previous years: Full calendar year
+// ========================================
+
+router.get("/summary/:employeeId", async (req, res) => {
+  const { employeeId } = req.params;
+  const year = Number(req.query.year);
+
+  if (
+    !Number.isInteger(year) ||
+    year < 2000 ||
+    year > 2100
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Please provide a valid year."
+    });
+  }
+
+  try {
+    // Get today's date according to India Standard Time.
+    const [dateRows] = await db.promise().query(`
+      SELECT DATE(
+        CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:30')
+      ) AS today
+    `);
+
+    const today = String(dateRows[0].today).slice(0, 10);
+    const currentYear = Number(today.slice(0, 4));
+
+    if (year > currentYear) {
+      return res.status(400).json({
+        success: false,
+        message: "Future year attendance summary is not available."
+      });
+    }
+
+    const startDate = `${year}-01-01`;
+    const endDate = year === currentYear
+      ? today
+      : `${year}-12-31`;
+
+    // Verify employee.
+    const [employees] = await db.promise().execute(
+      `SELECT employee_id
+       FROM employees
+       WHERE employee_id = ?`,
+      [employeeId]
+    );
+
+    if (employees.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found."
+      });
+    }
+
+    // Fetch attendance records for the selected period.
+    const [attendanceRows] = await db.promise().execute(
+      `SELECT
+         DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendanceDate,
+         LOWER(TRIM(status)) AS status
+       FROM attendance
+       WHERE employee_id = ?
+         AND attendance_date >= ?
+         AND attendance_date < DATE_ADD(?, INTERVAL 1 DAY)`,
+      [employeeId, startDate, endDate]
+    );
+
+    // Fetch approved leaves overlapping the selected period.
+    const [leaveRows] = await db.promise().execute(
+      `SELECT
+         DATE_FORMAT(start_date, '%Y-%m-%d') AS startDate,
+         DATE_FORMAT(end_date, '%Y-%m-%d') AS endDate
+       FROM leaves
+       WHERE employee_id = ?
+         AND LOWER(TRIM(status)) = 'approved'
+         AND start_date <= ?
+         AND end_date >= ?`,
+      [employeeId, endDate, startDate]
+    );
+
+    // Store attendance by date.
+    const attendanceMap = new Map();
+
+    attendanceRows.forEach(record => {
+      const date = String(record.attendanceDate).slice(0, 10);
+      attendanceMap.set(date, record.status);
+    });
+
+    // Store approved leave dates, excluding Sundays.
+    const leaveDates = new Set();
+
+    leaveRows.forEach(leave => {
+      const leaveStart = String(leave.startDate).slice(0, 10);
+      const leaveEnd = String(leave.endDate).slice(0, 10);
+
+      const start = new Date(`${leaveStart}T00:00:00Z`);
+      const end = new Date(`${leaveEnd}T00:00:00Z`);
+
+      const current = new Date(
+        Math.max(start.getTime(), Date.parse(`${startDate}T00:00:00Z`))
+      );
+
+      const lastDate = new Date(
+        Math.min(end.getTime(), Date.parse(`${endDate}T00:00:00Z`))
+      );
+
+      while (current <= lastDate) {
+        if (current.getUTCDay() !== 0) {
+          leaveDates.add(current.toISOString().slice(0, 10));
+        }
+
+        current.setUTCDate(current.getUTCDate() + 1);
+      }
+    });
+
+    // Calculate attendance summary.
+    let workingDays = 0;
+    let presentDays = 0;
+    let leaveDays = 0;
+    let absentDays = 0;
+    let notMarkedDays = 0;
+
+    const current = new Date(`${startDate}T00:00:00Z`);
+    const lastDate = new Date(`${endDate}T00:00:00Z`);
+
+    while (current <= lastDate) {
+      const date = current.toISOString().slice(0, 10);
+      const day = current.getUTCDay();
+
+      // Sunday is weekly off.
+      if (day !== 0) {
+        workingDays++;
+
+        // Approved leave takes priority for that date.
+        if (leaveDates.has(date)) {
+          leaveDays++;
+        } else {
+          const status = attendanceMap.get(date);
+
+          if (status === "present") {
+            presentDays++;
+          } else if (status === "absent") {
+            absentDays++;
+          } else {
+            notMarkedDays++;
+          }
+        }
+      }
+
+      current.setUTCDate(current.getUTCDate() + 1);
+    }
+
+    const attendancePercentage = workingDays > 0
+      ? Number(((presentDays / workingDays) * 100).toFixed(2))
+      : 0;
+
+    return res.json({
+      success: true,
+      employeeId,
+      year,
+      period: {
+        from: startDate,
+        to: endDate
+      },
+      summary: {
+        workingDays,
+        presentDays,
+        leaveDays,
+        absentDays,
+        notMarkedDays,
+        attendancePercentage
+      }
+    });
+
+  } catch (error) {
+    console.error("Yearly attendance summary error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to calculate yearly attendance summary."
+    });
+  }
+});
+
 module.exports = router;
