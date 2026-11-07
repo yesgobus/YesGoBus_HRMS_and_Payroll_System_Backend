@@ -1,4 +1,3 @@
-
 const express = require("express");
 const db = require("../db");
 const bcrypt = require("bcryptjs");
@@ -106,12 +105,6 @@ async function verifyPassword(inputPassword, storedPassword, employeeId) {
 
 router.post("/login", async (req, res) => {
   try {
-    console.log("========== LOGIN DEBUG ==========");
-console.log("Request body:", req.body);
-console.log("Employee ID:", req.body?.employeeId);
-console.log("Employee ID (snake case):", req.body?.employee_id);
-console.log("Password received:", !!req.body?.password);
-console.log("=================================");
     // Supports both employeeId and employee_id
     const employeeId =
       req.body.employeeId || req.body.employee_id;
@@ -317,7 +310,9 @@ router.post("/forgot-password", async (req, res) => {
 
     // Generate six-digit OTP
     const otp = crypto.randomInt(100000, 1000000).toString();
+
     const otpHash = hashValue(otp);
+
     const otpExpiry = new Date(Date.now() + 5 * 60 * 1000);
 
     await query(
@@ -338,12 +333,15 @@ router.post("/forgot-password", async (req, res) => {
         from: process.env.SMTP_FROM || process.env.SMTP_USER,
         to: employee.email,
         subject: "YesGoBus HRMS - Password Reset OTP",
+
         text: `Your YesGoBus HRMS password reset OTP is ${otp}.
 
 This OTP is valid for 5 minutes.
+
 Do not share this OTP with anyone.
 
 If you did not request a password reset, please ignore this email.`,
+
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto;">
             <h2>YesGoBus HRMS</h2>
@@ -482,6 +480,7 @@ router.post("/verify-otp", async (req, res) => {
     }
 
     const submittedHash = hashValue(String(otp));
+
     const storedHash = employee.password_reset_otp_hash;
 
     const otpIsValid =
@@ -507,7 +506,9 @@ router.post("/verify-otp", async (req, res) => {
 
     // Generate secure random reset token
     const resetToken = crypto.randomBytes(32).toString("hex");
+
     const resetTokenHash = hashValue(resetToken);
+
     const resetExpiry = new Date(Date.now() + 10 * 60 * 1000);
 
     // Save token before returning it
