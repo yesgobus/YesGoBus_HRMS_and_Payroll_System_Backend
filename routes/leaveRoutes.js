@@ -1,7 +1,12 @@
 
 const express = require("express");
 const db = require("../db");
-const { sendLeaveNotification } = require("../utils/emailService");
+
+const {
+  sendLeaveNotification,
+  sendLeaveApprovedEmail,
+  sendLeaveRejectedEmail
+} = require("../utils/emailService");
 
 const router = express.Router();
 
@@ -18,14 +23,19 @@ const LEAVE_ALLOCATION = {
 // --------------------------------------------------
 
 function isValidDate(value) {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(value)
+  ) {
     return false;
   }
 
   const date = new Date(`${value}T00:00:00Z`);
 
-  return !Number.isNaN(date.getTime()) &&
-    date.toISOString().slice(0, 10) === value;
+  return (
+    !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
+  );
 }
 
 function daysBetween(start, end) {
@@ -35,7 +45,6 @@ function daysBetween(start, end) {
   return Math.floor((endTime - startTime) / 86400000) + 1;
 }
 
-// Calculate the number of leave days falling inside a particular year.
 function daysInYear(startDate, endDate, year) {
   const yearStart = `${year}-01-01`;
   const yearEnd = `${year}-12-31`;
@@ -89,7 +98,6 @@ function calculateYearlyUsage(leaves, year) {
 
 function buildBalanceResponse(employeeId, year, leaves) {
   const usage = calculateYearlyUsage(leaves, year);
-
   const leaveBalances = {};
 
   for (const type of ALLOWED_LEAVE_TYPES) {
@@ -164,8 +172,7 @@ router.post("/apply", async (req, res) => {
     connection = await getConnection();
     await connection.beginTransaction();
 
-    // Lock the employee row so simultaneous applications
-    // for the same employee are processed one at a time.
+    // Lock employee row to prevent simultaneous applications.
     const [employees] = await connection.execute(
       `SELECT employee_id
        FROM employees
@@ -184,7 +191,7 @@ router.post("/apply", async (req, res) => {
       });
     }
 
-    // Get all active reservations and approved leave records.
+    // Get pending and approved leaves.
     const [existingLeaves] = await connection.execute(
       `SELECT leave_type, start_date, end_date, status
        FROM leaves
@@ -194,10 +201,12 @@ router.post("/apply", async (req, res) => {
       [employeeId]
     );
 
-    // Prevent overlapping pending or approved leave applications.
+    // Prevent overlapping applications.
     const overlaps = existingLeaves.some(leave => {
-      return startDate <= leave.end_date &&
-        endDate >= leave.start_date;
+      return (
+        startDate <= leave.end_date &&
+        endDate >= leave.start_date
+      );
     });
 
     if (overlaps) {
@@ -209,13 +218,20 @@ router.post("/apply", async (req, res) => {
       });
     }
 
-    // Check the requested days against each calendar year's balance.
+    // Check yearly leave balance.
     const years = getYears(startDate, endDate);
 
     for (const year of years) {
-      const requestedDays = daysInYear(startDate, endDate, year);
+      const requestedDays = daysInYear(
+        startDate,
+        endDate,
+        year
+      );
 
-      const usage = calculateYearlyUsage(existingLeaves, year);
+      const usage = calculateYearlyUsage(
+        existingLeaves,
+        year
+      );
 
       const used = usage[leaveType].used;
       const pending = usage[leaveType].pending;
@@ -239,8 +255,7 @@ router.post("/apply", async (req, res) => {
       }
     }
 
-    // Insert pending leave.
-    // Pending leave immediately reserves the requested days.
+    // Insert pending leave application.
     const [insertResult] = await connection.execute(
       `INSERT INTO leaves
        (employee_id, leave_type, start_date, end_date, reason, status)
@@ -263,7 +278,10 @@ router.post("/apply", async (req, res) => {
       try {
         await connection.rollback();
       } catch (rollbackError) {
-        console.error("Leave transaction rollback error:", rollbackError);
+        console.error(
+          "Leave transaction rollback error:",
+          rollbackError
+        );
       }
     }
 
@@ -279,8 +297,8 @@ router.post("/apply", async (req, res) => {
     if (connection) connection.release();
   }
 
-  // Send notifications only after the leave application is committed.
-  // A notification failure does not cancel the application.
+  // Send application notification after database commit.
+  // Email failure does not cancel the leave application.
 
   const recipientSql = `
     SELECT
@@ -344,6 +362,7 @@ router.post("/apply", async (req, res) => {
       }
     ];
 
+    // Remove empty and duplicate email addresses.
     const uniqueRecipients = [
       ...new Map(
         recipients
@@ -555,7 +574,7 @@ router.put("/status/:leaveId", async (req, res) => {
     connection = await getConnection();
     await connection.beginTransaction();
 
-    // Find the employee associated with this leave.
+    // Find employee associated with this leave.
     const [initialRows] = await connection.execute(
       `SELECT employee_id
        FROM leaves
@@ -574,7 +593,7 @@ router.put("/status/:leaveId", async (req, res) => {
 
     const employeeId = initialRows[0].employee_id;
 
-    // Lock employee first to serialize balance-affecting operations.
+    // Lock employee row.
     await connection.execute(
       `SELECT employee_id
        FROM employees
@@ -583,12 +602,18 @@ router.put("/status/:leaveId", async (req, res) => {
       [employeeId]
     );
 
-    // Recheck leave and manager authorization under the transaction.
+    // Fetch leave and employee details.
     const [leaveRows] = await connection.execute(
       `SELECT
          l.id,
          l.employee_id,
+         l.leave_type,
+         l.start_date,
+         l.end_date,
+         l.reason,
          l.status,
+         e.name AS employeeName,
+         e.email AS employeeEmail,
          e.reporting_manager_id
        FROM leaves l
        INNER JOIN employees e
@@ -598,7 +623,10 @@ router.put("/status/:leaveId", async (req, res) => {
       [leaveId]
     );
 
-    if (leaveRows.length === 0 || leaveRows[0].status !== "Pending") {
+    if (
+      leaveRows.length === 0 ||
+      leaveRows[0].status !== "Pending"
+    ) {
       await connection.rollback();
 
       return res.status(404).json({
@@ -609,7 +637,11 @@ router.put("/status/:leaveId", async (req, res) => {
 
     const leave = leaveRows[0];
 
-    if (String(leave.reporting_manager_id) !== String(managerId)) {
+    // Verify reporting manager.
+    if (
+      String(leave.reporting_manager_id) !==
+      String(managerId)
+    ) {
       await connection.rollback();
 
       return res.status(403).json({
@@ -618,6 +650,7 @@ router.put("/status/:leaveId", async (req, res) => {
       });
     }
 
+    // Update leave status.
     const [updateResult] = await connection.execute(
       `UPDATE leaves
        SET status = ?
@@ -635,14 +668,56 @@ router.put("/status/:leaveId", async (req, res) => {
       });
     }
 
+    // Commit status before sending email.
     await connection.commit();
+
+    // Release connection before SMTP operation.
+    connection.release();
+    connection = null;
+
+    // Send notification to employee.
+    let emailSent = false;
+    let emailError = null;
+
+    try {
+      const emailDetails = {
+        employeeEmail: leave.employeeEmail,
+        employeeName: leave.employeeName,
+        employeeId: leave.employee_id,
+        leaveId: leave.id,
+        leaveType: leave.leave_type,
+        startDate: leave.start_date,
+        endDate: leave.end_date,
+        reason: leave.reason
+      };
+
+      if (status === "Approved") {
+        await sendLeaveApprovedEmail(emailDetails);
+      } else {
+        await sendLeaveRejectedEmail(emailDetails);
+      }
+
+      emailSent = true;
+
+    } catch (mailError) {
+      emailError = mailError.message;
+
+      console.error(
+        `Leave ${leaveId} status updated, but employee email failed:`,
+        mailError
+      );
+    }
 
     return res.json({
       success: true,
-      message: `Leave ${status.toLowerCase()} successfully`,
+      message: emailSent
+        ? `Leave ${status.toLowerCase()} successfully. Employee email notification sent.`
+        : `Leave ${status.toLowerCase()} successfully, but employee email notification failed.`,
       leaveId,
       employeeId,
       status,
+      emailSent,
+      emailError,
       balanceAction: status === "Rejected"
         ? "Reserved leave restored"
         : "Leave deduction retained"
@@ -727,7 +802,11 @@ router.get("/balance/:employeeId", async (req, res) => {
     ? Number(req.query.year)
     : new Date().getFullYear();
 
-  if (!Number.isInteger(year) || year < 2000 || year > 9999) {
+  if (
+    !Number.isInteger(year) ||
+    year < 2000 ||
+    year > 9999
+  ) {
     return res.status(400).json({
       success: false,
       message: "Provide a valid calendar year"
@@ -787,5 +866,9 @@ router.get("/balance/:employeeId", async (req, res) => {
     });
   }
 });
+
+// --------------------------------------------------
+// EXPORT ROUTER
+// --------------------------------------------------
 
 module.exports = router;

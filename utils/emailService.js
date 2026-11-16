@@ -22,6 +22,7 @@ function createEmailTransporter() {
   });
 }
 
+// Existing notification: send leave application to manager.
 async function sendLeaveNotification({
   managerEmail,
   employeeName,
@@ -61,6 +62,76 @@ async function sendLeaveNotification({
   return info;
 }
 
+// Common function: notify employee about the manager's decision.
+async function sendLeaveDecisionEmail({
+  employeeEmail,
+  employeeName,
+  employeeId,
+  leaveId,
+  leaveType,
+  startDate,
+  endDate,
+  reason,
+  status
+}) {
+  if (!employeeEmail) {
+    throw new Error("Employee email address is missing");
+  }
+
+  const transporter = createEmailTransporter();
+
+  const approved = status === "Approved";
+
+  const info = await transporter.sendMail({
+    from: process.env.MAIL_FROM || process.env.SMTP_USER,
+    to: employeeEmail,
+    subject: `Your leave request has been ${status.toLowerCase()}`,
+    text: [
+      `Hello ${employeeName || "Employee"},`,
+      "",
+      `Your leave request has been ${status.toLowerCase()}.`,
+      "",
+      `Leave ID: ${leaveId}`,
+      `Employee ID: ${employeeId}`,
+      `Leave type: ${leaveType}`,
+      `Start date: ${startDate}`,
+      `End date: ${endDate}`,
+      `Status: ${status}`,
+      `Original leave reason: ${reason || "Not provided"}`,
+      "",
+      approved
+        ? "Your leave has been approved. Please check the YesGoBus HRMS for details."
+        : "Your leave has been rejected. Please contact your manager if you need clarification.",
+      "",
+      "Regards,",
+      "YesGoBus HRMS"
+    ].join("\n")
+  });
+
+  console.log(`Leave ${status} email accepted:`, info.accepted);
+  console.log("SMTP rejected:", info.rejected);
+  console.log("SMTP response:", info.response);
+  console.log("SMTP message ID:", info.messageId);
+
+  return info;
+}
+
+async function sendLeaveApprovedEmail(details) {
+  return sendLeaveDecisionEmail({
+    ...details,
+    status: "Approved"
+  });
+}
+
+async function sendLeaveRejectedEmail(details) {
+  return sendLeaveDecisionEmail({
+    ...details,
+    status: "Rejected"
+  });
+}
+
 module.exports = {
-  sendLeaveNotification
+  sendLeaveNotification,
+  sendLeaveApprovedEmail,
+  sendLeaveRejectedEmail
 };
