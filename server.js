@@ -9,6 +9,14 @@ const leaveRoutes = require("./routes/leaveRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 
 const app = express();
+app.get("/hrms-check", (req, res) => {
+  res.json({
+    success: true,
+    application: "YesGoBus HRMS",
+    version: "606b7ee9",
+    timestamp: new Date().toISOString()
+  });
+});
 
 app.use(cors());
 app.use(express.json());
